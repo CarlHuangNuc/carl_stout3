@@ -29,6 +29,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter
+import soundfile as sf
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
@@ -3850,7 +3851,7 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
             "max_new_tokens": thinker_max_new_tokens,
         }
         talker_kwargs = {
-            "max_new_tokens": talker_max_new_tokens,
+            "max_new_tokens": 100,
             "do_sample": talker_do_sample,
             "top_k": talker_top_k,
             "top_p": talker_top_p,
@@ -4002,9 +4003,10 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
             inputs_embeds=talker_inputs_embeds,
             attention_mask=talker_attention_mask,
             suppress_tokens=[self.talker.codec_bos_token],
+            return_dict_in_generate=True,
             **{k: (v.to(input_ids.device) if torch.is_tensor(v) else v) for k, v in talker_kwargs.items()},
         )
-        talker_generate_codes = talker_result[:, talker_input_ids.shape[1] : -1]
+        talker_generate_codes = talker_result["sequences"][:, talker_input_ids.shape[1] : -1]
 
         # 3. Generate wavs from code
         if self.token2wav.dtype != torch.float:
@@ -4016,6 +4018,49 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
             reference_mel=speaker_params["ref_mel"].to(input_ids.device).float(),
             **token2wav_kwargs,
         )
+
+        sf.write("./carl_new_test_sout_slice1.wav",wav.reshape(-1).detach().cpu().numpy(),samplerate=24000,)
+        #exit()
+
+        new_token = talker_result["sequences"][:,-1:]
+        new_attention_mask = torch.ones((new_token.shape[0],(talker_result["sequences"].shape[1])), dtype=torch.int, device=self.device)
+        if talker_result["past_key_values"] is not None:
+            cache_length = talker_result["past_key_values"][0][0].shape[2]
+        else:
+            cache_length = 0
+        cache_position = torch.arange(cache_length,                
+                    cache_length + new_token.shape[1],
+                    device=self.device)
+
+
+        talker_result = self.talker.generate(
+                input_ids = new_token,
+                input_text_ids=talker_input_text_ids,
+                thinker_reply_part=thinker_reply_part,
+                inputs_embeds=talker_inputs_embeds,
+                attention_mask=new_attention_mask,
+                suppress_tokens=[self.talker.codec_bos_token],
+                cache_position = cache_position,
+                past_key_values=talker_result["past_key_values"],
+                return_dict_in_generate=True,
+        **{k: (v.to(input_ids.device) if torch.is_tensor(v) else v) for k, v in talker_kwargs.items()},
+        )
+        talker_generate_codes = talker_result["sequences"][:,  : -1]
+
+        # 3. Generate wavs from code
+        if self.token2wav.dtype != torch.float:
+            self.token2wav.float()
+        wav = self.token2wav(
+                talker_generate_codes.to(input_ids.device),
+                conditioning=speaker_params["cond"].to(input_ids.device).float(),
+                reference_mel=speaker_params["ref_mel"].to(input_ids.device).float(),
+                **token2wav_kwargs,
+                )
+
+
+        sf.write("./carl_new_test_sout_slice2.wav",wav.reshape(-1).detach().cpu().numpy(),samplerate=24000,)
+        exit()
+
 
         return thinker_result.sequences, wav.float()
 
