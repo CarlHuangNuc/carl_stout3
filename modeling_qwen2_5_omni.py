@@ -2135,6 +2135,7 @@ class Qwen2_5OmniTalkerModel(Qwen2_5OmniPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+           
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
@@ -2302,6 +2303,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCon
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        streaming: Optional[bool] = None,
     ) -> Union[tuple, Qwen2_5OmniTalkerCausalLMOutputWithPast]:
         r"""
         thinker_reply_part (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
@@ -2375,6 +2377,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCon
                 self.rope_deltas = rope_deltas
 
             else:
+
                 batch_size, seq_length = input_ids.shape
                 delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
                 position_ids = torch.arange(seq_length, device=input_ids.device)
@@ -2388,6 +2391,10 @@ class Qwen2_5OmniTalkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCon
             inputs_embeds = codec_embeds + thinker_reply_part[:, :1, :]
             if thinker_reply_part.shape[1] > 1:
                 thinker_reply_part = thinker_reply_part[:, 1:, :]
+            #if streaming == True:    
+            #    exit()   
+        else:
+            print("777777777777777777777777777777")
 
         talker_lm_input = self.thinker_to_talker_proj(inputs_embeds)
 
@@ -2430,6 +2437,7 @@ class Qwen2_5OmniTalkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForCon
         inputs_embeds = model_kwargs.pop("inputs_embeds")
         model_kwargs = super()._get_initial_cache_position(seq_length, device, model_kwargs)
         model_kwargs["inputs_embeds"] = inputs_embeds
+
         return model_kwargs
 
     # prepare inputs for talker lm generation
@@ -3836,8 +3844,7 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
                 - **Audio waveform** (`torch.Tensor`): Generated audio waveform.
         """
 
-        print("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        print(talker_eos_token_id)
+        full_wav = []
 
         if speaker not in self.speaker_map:
             raise ValueError(f"{speaker} is not available, available speakers: {self.speaker_map.keys()}")
@@ -3853,9 +3860,12 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
         shared_kwargs = {"use_audio_in_video": use_audio_in_video}
         thinker_kwargs = {
             "max_new_tokens": thinker_max_new_tokens,
+            "do_sample": False,
         }
+        carl_custom_tokens = 500
         talker_kwargs = {
-            "max_new_tokens": 4096,
+            ### carl add    
+            "max_new_tokens": carl_custom_tokens,
             "do_sample": talker_do_sample,
             "top_k": talker_top_k,
             "top_p": talker_top_p,
@@ -4012,11 +4022,6 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
             **{k: (v.to(input_ids.device) if torch.is_tensor(v) else v) for k, v in talker_kwargs.items()},
         )
         talker_generate_codes = talker_result["sequences"][:, talker_input_ids.shape[1] : ]
-     
-        print(talker_result["sequences"])
-        print(self.talker.codec_bos_token)
-        print(self.talker.codec_eos_token)
-        exit()
         # 3. Generate wavs from code
         if self.token2wav.dtype != torch.float:
             self.token2wav.float()
@@ -4028,48 +4033,45 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
             **token2wav_kwargs,
         )
 
-        print(self.talker.codec_bos_token)
-        print("ttttttttttttttttttt")
+        full_wav.append(wav)
 
-        sf.write("./carl_new_test_sout_slice1.wav",wav.reshape(-1).detach().cpu().numpy(),samplerate=24000,)
-        exit()
-
-        total_tokens = 0
-        max_total_tokens = 4000  # 总目标最大token数
-
+        total_tokens = carl_custom_tokens 
         new_token = talker_result["sequences"][:,-1:]
-        while total_tokens < max_total_tokens:
+        get_tokens  = carl_custom_tokens + 1
+        while get_tokens == carl_custom_tokens + 1 and total_tokens < 2000:
             if talker_result["past_key_values"] is not None:
                 cache_length = talker_result["past_key_values"][0][0].shape[2]
             else:
                 cache_length = 0
             
-            new_attention_mask = torch.ones((new_token.shape[0],(cache_length+1)), dtype=torch.int, device=self.device)    
+            new_attention_mask = torch.ones((new_token.shape[0],(cache_length+1)), dtype=torch.int, device=self.device)
+
             cache_position = torch.arange(cache_length,                
                     cache_length + new_token.shape[1],
                     device=self.device)
 
-            print(self.talker.codec_bos_token)
-            exit()
             talker_result = self.talker.generate(
                 input_ids = new_token,
                 input_text_ids=talker_input_text_ids,
                 thinker_reply_part=thinker_reply_part,
                 inputs_embeds=talker_inputs_embeds,
+                #inputs_embeds=None,
                 attention_mask=new_attention_mask,
                 suppress_tokens=[self.talker.codec_bos_token],
                 cache_position = cache_position,
                 past_key_values=talker_result["past_key_values"],
                 return_dict_in_generate=True,
+                streaming=True,
             **{k: (v.to(input_ids.device) if torch.is_tensor(v) else v) for k, v in talker_kwargs.items()},
             )
-            talker_generate_codes = talker_result["sequences"][:,  1: ]
 
-            if talker_result["sequences"].shape[1]< 100:
+            if talker_result["sequences"].shape[1]< carl_custom_tokens + 1:
                 print("bring the end of ...rrrrrrrrrrrrrrrrrrrrr")
-                exit()
+                print(talker_result["sequences"])
+                talker_generate_codes = talker_result["sequences"][:,  new_token.shape[1]: -1]
+            else:
+                talker_generate_codes = talker_result["sequences"][:,  new_token.shape[1]: ]
 
-            
             # 3. Generate wavs from code
             if self.token2wav.dtype != torch.float:
                 self.token2wav.float()
@@ -4081,19 +4083,19 @@ class Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, Generation
                 **token2wav_kwargs,
                 )
 
-             
-            save_str = "./carl_new_test_sout_slice_while_" + str(total_tokens) + ".wav"
-            sf.write(save_str,wav.reshape(-1).detach().cpu().numpy(),samplerate=24000,)
-        
+            full_wav.append(wav)
+            get_tokens = talker_result["sequences"].shape[1] 
             new_token = talker_result["sequences"][:,-1:]
-            print(new_token)
-            print(talker_result["past_key_values"][0][0].shape)
             total_tokens += talker_result["sequences"].shape[1] - 1
-            print(f"Generated {total_tokens}/{max_total_tokens} tokens")
+            print(f"Generated {total_tokens} tokens")
             
 
 
-        
+        print("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj") 
+        print(len(full_wav))
+        merged_wav = torch.cat(full_wav, dim=0)
+        sf.write("./merge.wav",merged_wav.reshape(-1).detach().cpu().numpy(),samplerate=24000,)
+        exit()
 
 
         return thinker_result.sequences, wav.float()
